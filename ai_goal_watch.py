@@ -37,7 +37,6 @@ def _latest_pending_per_event():
   if not eid:continue
   old=latest.get(eid)
   if old is None or int(r.get('created_ts',0) or 0)>=int(old.get('created_ts',0) or 0):latest[eid]=r
- # Legacy duplicates from earlier buggy versions are voided so an old entry can never steal a new goal.
  for r in rows:
   eid=str(r.get('event_id') or '')
   if eid and latest.get(eid) is not r:
@@ -48,9 +47,7 @@ def _latest_pending_per_event():
 def _confirm(row,target_score):
  eid=str(row.get('event_id') or '')
  before=_score(row.get('score_at_signal'))
- time.sleep(CONFIRM_MIN)
  for attempt in range(CONFIRM_RETRIES):
-  # The exact signal must still be pending; otherwise another path already settled it.
   if not journal.has_pending_event(eid):return False
   try:
    body=fetch_summary(eid)
@@ -62,14 +59,12 @@ def _confirm(row,target_score):
    logger.warning('AI_GOAL_CONFIRM_FETCH_FAILED %s attempt=%d: %s',eid,attempt+1,exc)
    if attempt+1<CONFIRM_RETRIES:time.sleep(CONFIRM_RETRY_SECONDS);continue
    return False
-  # Same production rule: if the candidate goal disappeared, treat it as cancelled/VAR and do not send a win.
   if sum(current)<sum(target_score):
    logger.warning('AI_GOAL_CANCELLED %s before=%s candidate=%s current=%s',eid,before,target_score,current)
    return False
   if sum(current)<=sum(before):
    logger.warning('AI_GOAL_ROLLBACK %s before=%s current=%s',eid,before,current)
    return False
-  # A goal on/before the entry minute is not a legitimate post-signal win.
   gm=int(goal_minute or 0);entry_min=int(row.get('minute') or 0)
   if gm and gm<=entry_min:
    journal.close(row.get('id'),'void',f'{current[0]}:{current[1]}',goal_minute)
@@ -92,7 +87,6 @@ def scan_once():
    before=_score(r.get('score_at_signal'));current=tuple(current)
    if sum(current)<=sum(before):
     _detected.pop(eid,None);continue
-   # First sighting only schedules a debounce window. This mirrors production GOOL and prevents instant/VAR wins.
    state=_detected.get(eid)
    if state is None or tuple(state.get('target') or ())!=current:
     _detected[eid]={'target':current,'ts':now,'goal_minute':goal_minute}
