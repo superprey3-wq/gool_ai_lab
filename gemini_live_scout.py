@@ -49,6 +49,8 @@ def _send_photo(card):
   except requests.RequestException as e:logger.warning("GEMINI_CARD_SEND_FAILED chat=%s %s",cid,e)
  return ok>0
 def send(m,v,model):
+ if journal.has_pending_event(m.event_id):
+  logger.warning("GEMINI_DUPLICATE_BLOCKED %s reason=pending_signal",m.event_id);return False
  prob=int(v.get("goal_probability") or 0);h=int(v.get("horizon_minutes") or 0);league=getattr(m,"league","") or "турнир не определён";now_msk=datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
  try:card=ai_signal_card.render(m,v,model,now_msk)
  except Exception:
@@ -85,6 +87,8 @@ def scan(live):
  for m in live:
   minute=int(getattr(m,"minute",0) or 0)
   if minute<MINUTE_MIN or minute>MINUTE_MAX or getattr(m,"is_halftime",False):continue
+  if journal.has_pending_event(m.event_id):
+   logger.info("GEMINI_SKIP_ACTIVE %s",m.event_id);continue
   old=_seen.get(str(m.event_id));score=(int(m.home_score or 0),int(m.away_score or 0))
   if old and now-old[0]<RECHECK and old[1]==score:continue
   c.append(m)
@@ -96,10 +100,11 @@ def scan(live):
   s=stats.get(str(m.event_id),{});return sum(pair(s,"shots_on_target"))*5+sum(pair(s,"big_chances"))*6+sum(pair(s,"xg"))*4+sum(pair(s,"shots"))*.5
  ready=[m for m in c if useful(stats.get(str(m.event_id),{}))];ready.sort(key=activity,reverse=True);sent=checked=0
  for m in ready[:MAX_AI_PER_CYCLE]:
+  if journal.has_pending_event(m.event_id):continue
   s=stats[str(m.event_id)];p=payload(m,s);v,e,model=ask(p);checked+=1;_seen[str(m.event_id)]=(now,(int(m.home_score or 0),int(m.away_score or 0)))
   if not v:logger.warning("GEMINI_SCOUT_FAILED %s %s",m.event_id,e);continue
   d=str(v.get("decision") or "");prob=int(v.get("goal_probability") or 0);logger.warning("GEMINI_SCOUT %d' %s — %s %d:%d | %s %d%% | model=%s",m.minute,m.home,m.away,m.home_score,m.away_score,d,prob,model)
   if d=="ENTER" and prob>=ENTER_PROB:
    fm,fv,fmodel=_freshen_before_send(m,v,model)
-   if fm is not None and send(fm,fv,fmodel):sent+=1
+   if fm is not None and not journal.has_pending_event(fm.event_id) and send(fm,fv,fmodel):sent+=1
  logger.info("GEMINI_SCOUT_CYCLE live=%d data_candidates=%d ai_checked=%d sent=%d",len(live),len(ready),checked,sent);return sent
