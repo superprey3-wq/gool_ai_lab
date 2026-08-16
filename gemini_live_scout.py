@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor,as_completed
 import requests
 from live_engine import fetch_stats,parse_stats,fetch_summary,parse_goal_timeline
 import unified_bot
+import score_sync_patch
 import ai_signal_journal as journal
 import ai_signal_card
 from telegram_subscribers import get_subscribers
@@ -20,7 +21,7 @@ def pair(s,k):
  except:return [0,0]
 def useful(s):return sum(sum(pair(s,k)) for k in ("xg","shots","shots_on_target","big_chances","corners","shots_inside_box","touches_box"))>0
 def prompt(p):
- return """Ты независимый профессиональный футбольный LIVE-аналитик. Твоя специализация — ловить ЕЩЁ ОДИН ГОЛ в текущем матче (рынок тотал больше от текущего счёта). Ты не знаешь решений GOOL, MASTER, MATH или других моделей. Анализируй ТОЛЬКО предоставленный моментальный снимок сырых LIVE-данных Flashscore. КРИТИЧЕСКИ ВАЖНО: minute и score в DATA — это ТЕКУЩИЕ минута и счёт на момент запроса. Никогда не называй другую текущую минуту или другой текущий счёт и не делай вывод, будто матч всё ещё находится на более раннем отрезке. goal_times — это ИСТОРИЯ уже случившихся голов; используй её только как прошлые события. Если последний гол был раньше, не путай его минуту с текущей минутой матча. horizon_minutes считай ВПЕРЁД именно от DATA.minute. Учитывай названия команд, турнир/лигу, xG, удары, удары в створ, big chances, действия/касания в штрафной, угловые и уже забитые голы. Учитывай контекст турнира только если он явно указан в DATA; ничего не выдумывай. ENTER — только когда сам видишь убедительное основание ждать минимум один следующий гол. WATCH — потенциал есть, но сейчас рано. REJECT — гол недостаточно вероятен. NO_DATA — данных мало. Не выдумывай отсутствующие показатели. Поля reason и risk пиши ТОЛЬКО НА РУССКОМ ЯЗЫКЕ, естественно и кратко. В reason начинай с актуального контекста вида «Сейчас N-я минута, счёт X:Y» и только затем объясняй решение. Названия команд и турнира оставляй как пришли из Flashscore. goal_probability — честная вероятность хотя бы одного следующего гола до конца матча. Верни только JSON по схеме.\nDATA:\n"""+json.dumps(p,ensure_ascii=False)
+ return """Ты независимый профессиональный футбольный LIVE-аналитик. Твоя специализация — ловить ЕЩЁ ОДИН ГОЛ в текущем матче. Анализируй ТОЛЬКО предоставленный актуальный снимок LIVE-данных Flashscore. КРИТИЧЕСКИ ВАЖНО: minute и score в DATA — единственные истинные текущие минута и счёт. НИКОГДА не утверждай, что какая-либо команда уже забила гол, если это не отражено в score. goal_times может быть пустым; это нормально. Если goal_times противоречит score — игнорируй goal_times полностью. Не предсказывай на основании события, которого нет в score. horizon_minutes считай вперёд от DATA.minute. Учитывай турнир, xG, удары, удары в створ, big chances, штрафную и угловые. ENTER — только когда сам видишь убедительное основание ждать минимум один следующий гол. WATCH — потенциал есть, но рано. REJECT — гол недостаточно вероятен. NO_DATA — данных мало. Поля reason и risk пиши только на русском. В reason начинай: «Сейчас N-я минута, счёт X:Y». Не выдумывай события. Верни только JSON по схеме.\nDATA:\n"""+json.dumps(p,ensure_ascii=False)
 def ask(p):
  if not KEY:return None,"missing_api_key",None
  body={"contents":[{"role":"user","parts":[{"text":prompt(p)}]}],"generationConfig":{"maxOutputTokens":300,"response_mime_type":"application/json","response_schema":SCHEMA}};last=""
@@ -35,10 +36,25 @@ def ask(p):
 def fetch_one(m):
  try:raw=fetch_stats(m.event_id);return m,parse_stats(raw) if raw else {}
  except:return m,{}
-def goals(m):
- try:raw=fetch_summary(m.event_id);return parse_goal_timeline(raw) if raw else []
- except:return []
-def payload(m,s):return {"event_id":str(m.event_id),"home":m.home,"away":m.away,"league":getattr(m,"league","") or "турнир не определён","minute":int(m.minute or 0),"score":[int(m.home_score or 0),int(m.away_score or 0)],"xg":pair(s,"xg"),"shots":pair(s,"shots"),"shots_on_target":pair(s,"shots_on_target"),"big_chances":pair(s,"big_chances"),"corners":pair(s,"corners"),"shots_inside_box":pair(s,"shots_inside_box"),"touches_box":pair(s,"touches_box"),"goal_times":goals(m),"snapshot_time_msk":datetime.now(MOSCOW_TZ).strftime("%H:%M:%S")}
+def _summary(m):
+ try:
+  raw=fetch_summary(m.event_id)
+  if not raw:return None,[]
+  current,_=score_sync_patch._summary_state(raw)
+  goals=parse_goal_timeline(raw) or []
+  return current,goals
+ except:return None,[]
+def _safe_goal_times(m):
+ current,gt=_summary(m)
+ score=(int(m.home_score or 0),int(m.away_score or 0))
+ if current is not None and tuple(current)!=score:
+  logger.warning("GEMINI_SCORE_MISMATCH %s live=%s summary=%s",m.event_id,score,current);return []
+ total=sum(score)
+ if total==0:return []
+ if len(gt)!=total:
+  logger.warning("GEMINI_GOAL_HISTORY_DROPPED %s score=%s goals=%d",m.event_id,score,len(gt));return []
+ return gt
+def payload(m,s):return {"event_id":str(m.event_id),"home":m.home,"away":m.away,"league":getattr(m,"league","") or "турнир не определён","minute":int(m.minute or 0),"score":[int(m.home_score or 0),int(m.away_score or 0)],"xg":pair(s,"xg"),"shots":pair(s,"shots"),"shots_on_target":pair(s,"shots_on_target"),"big_chances":pair(s,"big_chances"),"corners":pair(s,"corners"),"shots_inside_box":pair(s,"shots_inside_box"),"touches_box":pair(s,"touches_box"),"goal_times":_safe_goal_times(m),"snapshot_time_msk":datetime.now(MOSCOW_TZ).strftime("%H:%M:%S")}
 def _send_photo(card):
  token=os.getenv("TELEGRAM_BOT_TOKEN","").strip();ok=0
  for cid in get_subscribers():
@@ -48,28 +64,35 @@ def _send_photo(card):
    else:logger.warning("GEMINI_CARD_SEND_FAILED chat=%s http=%s %s",cid,r.status_code,r.text[:160])
   except requests.RequestException as e:logger.warning("GEMINI_CARD_SEND_FAILED chat=%s %s",cid,e)
  return ok>0
+def _summary_score_ok(m):
+ current,_=_summary(m)
+ expected=(int(m.home_score or 0),int(m.away_score or 0))
+ if current is None:return False
+ ok=tuple(current)==expected
+ if not ok:logger.warning("GEMINI_STALE_SCORE_BLOCKED %s card=%s summary=%s",m.event_id,expected,current)
+ return ok
 def send(m,v,model):
- if journal.has_pending_event(m.event_id):
-  logger.warning("GEMINI_DUPLICATE_BLOCKED %s reason=pending_signal",m.event_id);return False
+ if journal.has_pending_event(m.event_id):logger.warning("GEMINI_DUPLICATE_BLOCKED %s reason=pending_signal",m.event_id);return False
+ if not _summary_score_ok(m):return False
  prob=int(v.get("goal_probability") or 0);h=int(v.get("horizon_minutes") or 0);league=getattr(m,"league","") or "турнир не определён";now_msk=datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
  try:card=ai_signal_card.render(m,v,model,now_msk)
- except Exception:
-  logger.exception("GEMINI_CARD_RENDER_FAILED %s",getattr(m,"event_id","?"));return False
+ except Exception:logger.exception("GEMINI_CARD_RENDER_FAILED %s",getattr(m,"event_id","?"));return False
+ if not _summary_score_ok(m):return False
  if not _send_photo(card):return False
  journal.add({"event_id":str(m.event_id),"home":m.home,"away":m.away,"league":league,"minute":int(m.minute or 0),"score_at_signal":f"{int(m.home_score or 0)}:{int(m.away_score or 0)}","probability":prob,"horizon":h,"confidence":v.get('confidence',''),"model":model,"reason":v.get('reason',''),"risk":v.get('risk','')});return True
 def _fresh_match(event_id):
  try:
-  live=asyncio.run(unified_bot.discover_live_matches())
-  return next((x for x in live if str(getattr(x,'event_id',''))==str(event_id)),None)
- except Exception as exc:
-  logger.warning("GEMINI_FRESH_RECHECK_FAILED %s: %s",event_id,exc);return None
+  live=asyncio.run(unified_bot.discover_live_matches());return next((x for x in live if str(getattr(x,'event_id',''))==str(event_id)),None)
+ except Exception as exc:logger.warning("GEMINI_FRESH_RECHECK_FAILED %s: %s",event_id,exc);return None
 def _freshen_before_send(m,v,model):
  fresh=_fresh_match(m.event_id)
- if not fresh:
-  logger.warning("GEMINI_STALE_BLOCKED %s reason=not_in_live",m.event_id);return None,None,None
- old_min=int(getattr(m,'minute',0) or 0);new_min=int(getattr(fresh,'minute',0) or 0);old_score=(int(getattr(m,'home_score',0) or 0),int(getattr(m,'away_score',0) or 0));new_score=(int(getattr(fresh,'home_score',0) or 0),int(getattr(fresh,'away_score',0) or 0))
- if new_min>MINUTE_MAX:
-  logger.warning("GEMINI_STALE_BLOCKED %s old=%d new=%d reason=too_late",m.event_id,old_min,new_min);return None,None,None
+ if not fresh:logger.warning("GEMINI_STALE_BLOCKED %s reason=not_in_live",m.event_id);return None,None,None
+ current,_=_summary(fresh)
+ fresh_score=(int(fresh.home_score or 0),int(fresh.away_score or 0))
+ if current is None or tuple(current)!=fresh_score:
+  logger.warning("GEMINI_STALE_BLOCKED %s reason=score_disagree live=%s summary=%s",m.event_id,fresh_score,current);return None,None,None
+ old_min=int(getattr(m,'minute',0) or 0);new_min=int(getattr(fresh,'minute',0) or 0);old_score=(int(getattr(m,'home_score',0) or 0),int(getattr(m,'away_score',0) or 0));new_score=fresh_score
+ if new_min>MINUTE_MAX:logger.warning("GEMINI_STALE_BLOCKED %s old=%d new=%d reason=too_late",m.event_id,old_min,new_min);return None,None,None
  drift=max(0,new_min-old_min);changed=drift>MAX_SIGNAL_DRIFT or new_score!=old_score
  if not changed:return fresh,v,model
  logger.warning("GEMINI_REANALYZE_FRESH %s old=%d %s new=%d %s",m.event_id,old_min,old_score,new_min,new_score)
@@ -77,18 +100,15 @@ def _freshen_before_send(m,v,model):
  except:s={}
  if not useful(s):return None,None,None
  nv,e,nmodel=ask(payload(fresh,s))
- if not nv:
-  logger.warning("GEMINI_FRESH_AI_FAILED %s %s",m.event_id,e);return None,None,None
- if str(nv.get('decision') or '')!='ENTER' or int(nv.get('goal_probability') or 0)<ENTER_PROB:
-  logger.warning("GEMINI_FRESH_REJECT %s %d' %s %s%%",m.event_id,new_min,nv.get('decision'),nv.get('goal_probability'));return None,None,None
+ if not nv:logger.warning("GEMINI_FRESH_AI_FAILED %s %s",m.event_id,e);return None,None,None
+ if str(nv.get('decision') or '')!='ENTER' or int(nv.get('goal_probability') or 0)<ENTER_PROB:logger.warning("GEMINI_FRESH_REJECT %s %d' %s %s%%",m.event_id,new_min,nv.get('decision'),nv.get('goal_probability'));return None,None,None
  return fresh,nv,nmodel
 def scan(live):
  now=time.time();c=[]
  for m in live:
   minute=int(getattr(m,"minute",0) or 0)
   if minute<MINUTE_MIN or minute>MINUTE_MAX or getattr(m,"is_halftime",False):continue
-  if journal.has_pending_event(m.event_id):
-   logger.info("GEMINI_SKIP_ACTIVE %s",m.event_id);continue
+  if journal.has_pending_event(m.event_id):logger.info("GEMINI_SKIP_ACTIVE %s",m.event_id);continue
   old=_seen.get(str(m.event_id));score=(int(m.home_score or 0),int(m.away_score or 0))
   if old and now-old[0]<RECHECK and old[1]==score:continue
   c.append(m)
