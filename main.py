@@ -26,10 +26,10 @@ import ai_goal_watch
 
 async def cycle():
  try:
-  t=time.monotonic();live=await visual_feed_unified_bot.unified_bot.discover_live_matches();score_sync_patch.reuse_once(live);sent=await asyncio.to_thread(gemini_live_scout.scan,live);logger.info("PURE_GEMINI_CYCLE live=%d sent=%d total=%.1fs",len(live),sent,time.monotonic()-t)
+  t=time.monotonic();live=await visual_feed_unified_bot.unified_bot.discover_live_matches();sent=await asyncio.to_thread(gemini_live_scout.scan,live);logger.info("PURE_GEMINI_CYCLE live=%d sent=%d total=%.1fs",len(live),sent,time.monotonic()-t)
  except Exception:logger.exception("PURE GEMINI cycle failed")
 async def main():
- ok,reason=visual_feed_unified_bot.telegram_config_status();logger.warning("GEMINI LIVE SCOUT START | independent Flashscore analyst | goal watch ON | report ON | Telegram=%s","OK" if ok else reason)
+ ok,reason=visual_feed_unified_bot.telegram_config_status();logger.warning("GEMINI LIVE SCOUT START | independent Flashscore analyst | fresh-live recheck ON | goal watch ON | report ON | Telegram=%s","OK" if ok else reason)
  poller=asyncio.create_task(polling_loop(),name='ai-telegram-poller');goal_watch=asyncio.create_task(ai_goal_watch.loop(),name='ai-goal-watch')
  try:
   while True:
