@@ -13,6 +13,12 @@ def _save(rows):
 def add(entry):
     rows=_load();entry=dict(entry);entry.setdefault('id',f"{entry.get('event_id')}:{int(time.time())}");entry.setdefault('created_ts',int(time.time()));entry.setdefault('result','pending');rows.append(entry);_save(rows);return entry['id']
 def pending():return [r for r in _load() if r.get('result')=='pending']
+def has_pending_event(event_id):
+    eid=str(event_id)
+    return any(str(r.get('event_id'))==eid and r.get('result')=='pending' for r in _load())
+def has_pending_snapshot(event_id,score):
+    eid=str(event_id);score=str(score)
+    return any(str(r.get('event_id'))==eid and str(r.get('score_at_signal'))==score and r.get('result')=='pending' for r in _load())
 def close(signal_id,result,final_score=None,goal_minute=None):
     rows=_load();changed=False
     for r in rows:
