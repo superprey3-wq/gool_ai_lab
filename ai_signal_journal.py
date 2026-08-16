@@ -38,33 +38,14 @@ def _bucket(day,lo,hi=None):
     w=sum(r.get('result')=='win' for r in arr);pct=round(w*100/len(arr)) if arr else 0
     return w,len(arr),pct
 def build_report():
-    day=_day_rows();wins=sum(r.get('result')=='win' for r in day);loss=sum(r.get('result')=='loss' for r in day);pend=sum(r.get('result')=='pending' for r in day);closed=wins+loss;rate=round(wins*100/closed) if closed else 0
+    day=_day_rows();wins=sum(r.get('result')=='win' for r in day);loss=sum(r.get('result')=='loss' for r in day);pend=sum(r.get('result')=='pending' for r in day);voids=sum(r.get('result')=='void' for r in day);closed=wins+loss;rate=round(wins*100/closed) if closed else 0
     b1=_bucket(day,70,79);b2=_bucket(day,80,89);b3=_bucket(day,90)
     now=datetime.now(MSK).strftime('%d.%m.%Y %H:%M')
-    lines=[
-        '📊 <b>GEMINI LIVE SCOUT — ОТЧЁТ</b>',
-        f'🗓 {now} МСК','',
-        '<pre>╭──────────────────────╮',
-        f'│ Сигналов      {len(day):>5} │',
-        f'│ ✅ Зашло       {wins:>5} │',
-        f'│ ❌ Не зашло    {loss:>5} │',
-        f'│ ⏳ В игре       {pend:>5} │',
-        f'│ 🎯 Проходимость {rate:>4}% │',
-        '╰──────────────────────╯</pre>',
-        '<b>🤖 По оценке Gemini</b>',
-        '<pre>┌────────┬────────┬──────┐',
-        '│ AI %   │ Win/All│ Win% │',
-        '├────────┼────────┼──────┤',
-        f'│ 70–79  │ {b1[0]:>2}/{b1[1]:<3} │ {b1[2]:>3}% │',
-        f'│ 80–89  │ {b2[0]:>2}/{b2[1]:<3} │ {b2[2]:>3}% │',
-        f'│ 90+    │ {b3[0]:>2}/{b3[1]:<3} │ {b3[2]:>3}% │',
-        '└────────┴────────┴──────┘</pre>',
-        '<b>Последние сигналы</b>',
-        '<pre>Р  Мин  AI   Матч</pre>'
-    ]
+    lines=['📊 <b>GEMINI LIVE SCOUT — ОТЧЁТ</b>',f'🗓 {now} МСК','',
+        '<pre>╭──────────────────────╮',f'│ Сигналов      {len(day):>5} │',f'│ ✅ Зашло       {wins:>5} │',f'│ ❌ Не зашло    {loss:>5} │',f'│ ⏳ В игре       {pend:>5} │',f'│ ⚪ Аннулир.     {voids:>5} │',f'│ 🎯 Проходимость {rate:>4}% │','╰──────────────────────╯</pre>',
+        '<b>🤖 По оценке Gemini</b>','<pre>┌────────┬────────┬──────┐','│ AI %   │ Win/All│ Win% │','├────────┼────────┼──────┤',f'│ 70–79  │ {b1[0]:>2}/{b1[1]:<3} │ {b1[2]:>3}% │',f'│ 80–89  │ {b2[0]:>2}/{b2[1]:<3} │ {b2[2]:>3}% │',f'│ 90+    │ {b3[0]:>2}/{b3[1]:<3} │ {b3[2]:>3}% │','└────────┴────────┴──────┘</pre>','<b>Последние сигналы</b>']
     for r in day[-8:][::-1]:
-        icon={'win':'✅','loss':'❌','pending':'⏳'}.get(r.get('result'),'•')
-        home=str(r.get('home') or '');away=str(r.get('away') or '');name=f'{home} — {away}'
+        icon={'win':'✅','loss':'❌','pending':'⏳','void':'⚪'}.get(r.get('result'),'•');home=str(r.get('home') or '');away=str(r.get('away') or '');name=f'{home} — {away}'
         if len(name)>29:name=name[:28]+'…'
         lines.append(f"{icon} <b>{name}</b>\n↳ {r.get('minute')}' · {r.get('score_at_signal')} · AI {r.get('probability')}%")
     if not day:lines.append('Пока сигналов за сегодня нет.')
