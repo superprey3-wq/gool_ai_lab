@@ -11,7 +11,13 @@ import requests
 import live_candidate_patch as lc
 import math_engine
 logger=logging.getLogger("gool_ai_first")
-MODEL=os.getenv("GEMINI_MODEL","gemini-2.5-flash").strip() or "gemini-2.5-flash"
+
+# Gemini 3.x stable models. Optional GEMINI_MODEL still lets the host override primary.
+PRIMARY_MODEL=os.getenv("GEMINI_MODEL","gemini-3.6-flash").strip() or "gemini-3.6-flash"
+FALLBACK_MODELS=[m.strip() for m in os.getenv("GEMINI_FALLBACK_MODELS","gemini-3.5-flash-lite,gemini-3.5-flash").split(",") if m.strip()]
+MODELS=[]
+for _m in [PRIMARY_MODEL,*FALLBACK_MODELS]:
+    if _m not in MODELS:MODELS.append(_m)
 API_KEY=os.getenv("GEMINI_API_KEY","").strip();TIMEOUT=max(5,int(os.getenv("AI_FIRST_TIMEOUT_SECONDS","18")))
 MIN_PROB=max(1,min(99,int(os.getenv("AI_FIRST_MIN_PROB","67"))));CACHE_SECONDS=max(30,int(os.getenv("AI_FIRST_CACHE_SECONDS","150")))
 FAIL_OPEN=os.getenv("AI_FIRST_FAIL_OPEN","0").strip().lower() in {"1","true","yes","on"};OUT=Path(os.getenv("AI_FIRST_JOURNAL","ai_first_decisions.jsonl"))
@@ -29,19 +35,31 @@ def _ask(payload):
     if not API_KEY:return None,"missing_api_key"
     eid=payload["event_id"];now=time.time();cached=_CACHE.get(eid)
     if cached and now-cached[0]<CACHE_SECONDS and cached[1].get("score")==payload.get("score"):return dict(cached[2]),None
-    url=f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent";body={"contents":[{"role":"user","parts":[{"text":_prompt(payload)}]}],"generationConfig":{"temperature":0.1,"maxOutputTokens":260,"response_mime_type":"application/json","response_schema":_SCHEMA}}
-    started=time.monotonic()
-    try:r=requests.post(url,headers={"x-goog-api-key":API_KEY,"Content-Type":"application/json"},json=body,timeout=TIMEOUT)
-    except requests.RequestException as exc:return None,f"request:{exc}"
-    if not r.ok:return None,f"http:{r.status_code}:{r.text[:160]}"
-    verdict=_extract(r.json())
-    if not verdict:return None,"bad_json"
-    verdict["latency_s"]=round(time.monotonic()-started,2);_CACHE[eid]=(now,{"score":payload.get("score")},dict(verdict))
-    if len(_CACHE)>1000:
-        cutoff=now-CACHE_SECONDS*2
-        for key,val in list(_CACHE.items()):
-            if val[0]<cutoff:_CACHE.pop(key,None)
-    return verdict,None
+    body={"contents":[{"role":"user","parts":[{"text":_prompt(payload)}]}],"generationConfig":{"maxOutputTokens":260,"response_mime_type":"application/json","response_schema":_SCHEMA}}
+    errors=[]
+    for model in MODELS:
+        url=f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent";started=time.monotonic()
+        try:r=requests.post(url,headers={"x-goog-api-key":API_KEY,"Content-Type":"application/json"},json=body,timeout=TIMEOUT)
+        except requests.RequestException as exc:
+            errors.append(f"{model}:request:{exc}");continue
+        if not r.ok:
+            errors.append(f"{model}:http:{r.status_code}:{r.text[:120]}")
+            # Model missing/retired/unsupported: immediately try the next stable model.
+            if r.status_code in {400,404}:continue
+            # Other API failures may also be model-specific; fallback once before giving up.
+            continue
+        verdict=_extract(r.json())
+        if not verdict:
+            errors.append(f"{model}:bad_json");continue
+        verdict["latency_s"]=round(time.monotonic()-started,2);verdict["model"]=model
+        _CACHE[eid]=(now,{"score":payload.get("score")},dict(verdict))
+        if len(_CACHE)>1000:
+            cutoff=now-CACHE_SECONDS*2
+            for key,val in list(_CACHE.items()):
+                if val[0]<cutoff:_CACHE.pop(key,None)
+        if model!=PRIMARY_MODEL:logger.warning("AI_MODEL_FALLBACK primary=%s selected=%s",PRIMARY_MODEL,model)
+        return verdict,None
+    return None," | ".join(errors)[:700] if errors else "no_model_available"
 def _append(row):
     try:
         with OUT.open("a",encoding="utf-8") as f:f.write(json.dumps(row,ensure_ascii=False)+"\n")
@@ -54,10 +72,10 @@ def _evaluate(m,s,p,goals,market):
     verdict,error=_ask(payload)
     if verdict:
         decision=str(verdict.get("decision") or "REJECT").upper();prob=int(verdict.get("goal_probability") or 0);ai_enter=decision=="ENTER" and prob>=MIN_PROB;ai_route=f"AI_{decision}_{prob}";transport_master=max(float(master or 0),75.0) if ai_enter else float(master or 0)
-        logger.warning("AI_CONSENSUS %s' %s — %s | GOOL=%.0f MATH=%.1f(q%d) GEMINI=%s %d%% | enter=%s",payload["minute"],payload["home"],payload["away"],master,math["probability"],math["quality"],decision,prob,ai_enter)
+        logger.warning("AI_CONSENSUS %s' %s — %s | GOOL=%.0f MATH=%.1f(q%d) GEMINI[%s]=%s %d%% | enter=%s",payload["minute"],payload["home"],payload["away"],master,math["probability"],math["quality"],verdict.get("model","?"),decision,prob,ai_enter)
         _append({"ts":int(time.time()),"payload":payload,"verdict":verdict,"final_enter":ai_enter});return ai_enter,ai_route,transport_master,sc,hz,mkt
     logger.warning("AI_FIRST_FAILED %s %s | fail_open=%s",payload["event_id"],error,FAIL_OPEN);_append({"ts":int(time.time()),"payload":payload,"error":error,"fallback":FAIL_OPEN})
     if FAIL_OPEN:return base
     return False,"AI_UNAVAILABLE",master,sc,hz,mkt
 lc._evaluate=_evaluate
-logger.warning("GOOL AI SCOUT: GOOL + MATH + Gemini consensus enabled | min_prob=%d | cache=%ss",MIN_PROB,CACHE_SECONDS)
+logger.warning("GOOL AI SCOUT: GOOL + MATH + Gemini consensus enabled | models=%s | min_prob=%d | cache=%ss",",".join(MODELS),MIN_PROB,CACHE_SECONDS)
