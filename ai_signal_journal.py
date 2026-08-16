@@ -20,17 +20,46 @@ def close(signal_id,result,final_score=None,goal_minute=None):
             r['result']=result;r['closed_ts']=int(time.time());r['final_score']=final_score or r.get('final_score');r['goal_minute']=goal_minute;changed=True
     if changed:_save(rows)
     return changed
-def build_report():
+def _day_rows():
     rows=_load();today=datetime.now(MSK).date();day=[]
     for r in rows:
         try:d=datetime.fromtimestamp(int(r.get('created_ts',0)),MSK).date()
         except:continue
         if d==today:day.append(r)
-    wins=sum(r.get('result')=='win' for r in day);loss=sum(r.get('result')=='loss' for r in day);pend=sum(r.get('result')=='pending' for r in day);closed=wins+loss;rate=round(wins*100/closed) if closed else 0
-    def bucket(lo,hi=None):
-        arr=[r for r in day if lo<=int(r.get('probability',0)) and (hi is None or int(r.get('probability',0))<=hi) and r.get('result') in {'win','loss'}]
-        w=sum(r.get('result')=='win' for r in arr);return f"{w}/{len(arr)} · {round(w*100/len(arr)) if arr else 0}%"
-    lines=[f"📊 <b>GEMINI SCOUT — ОТЧЁТ</b>",f"🗓 {datetime.now(MSK).strftime('%d.%m.%Y %H:%M')} МСК","",f"Сигналов: <b>{len(day)}</b>",f"✅ Зашло: <b>{wins}</b>",f"❌ Не зашло: <b>{loss}</b>",f"⏳ В игре: <b>{pend}</b>",f"🎯 Проходимость закрытых: <b>{rate}%</b>","","🤖 <b>По оценке Gemini</b>",f"• 70–79%: {bucket(70,79)}",f"• 80–89%: {bucket(80,89)}",f"• 90%+: {bucket(90)}","","Последние сигналы:"]
+    return day
+def _bucket(day,lo,hi=None):
+    arr=[r for r in day if lo<=int(r.get('probability',0)) and (hi is None or int(r.get('probability',0))<=hi) and r.get('result') in {'win','loss'}]
+    w=sum(r.get('result')=='win' for r in arr);pct=round(w*100/len(arr)) if arr else 0
+    return w,len(arr),pct
+def build_report():
+    day=_day_rows();wins=sum(r.get('result')=='win' for r in day);loss=sum(r.get('result')=='loss' for r in day);pend=sum(r.get('result')=='pending' for r in day);closed=wins+loss;rate=round(wins*100/closed) if closed else 0
+    b1=_bucket(day,70,79);b2=_bucket(day,80,89);b3=_bucket(day,90)
+    now=datetime.now(MSK).strftime('%d.%m.%Y %H:%M')
+    lines=[
+        '📊 <b>GEMINI LIVE SCOUT — ОТЧЁТ</b>',
+        f'🗓 {now} МСК','',
+        '<pre>╭──────────────────────╮',
+        f'│ Сигналов      {len(day):>5} │',
+        f'│ ✅ Зашло       {wins:>5} │',
+        f'│ ❌ Не зашло    {loss:>5} │',
+        f'│ ⏳ В игре       {pend:>5} │',
+        f'│ 🎯 Проходимость {rate:>4}% │',
+        '╰──────────────────────╯</pre>',
+        '<b>🤖 По оценке Gemini</b>',
+        '<pre>┌────────┬────────┬──────┐',
+        '│ AI %   │ Win/All│ Win% │',
+        '├────────┼────────┼──────┤',
+        f'│ 70–79  │ {b1[0]:>2}/{b1[1]:<3} │ {b1[2]:>3}% │',
+        f'│ 80–89  │ {b2[0]:>2}/{b2[1]:<3} │ {b2[2]:>3}% │',
+        f'│ 90+    │ {b3[0]:>2}/{b3[1]:<3} │ {b3[2]:>3}% │',
+        '└────────┴────────┴──────┘</pre>',
+        '<b>Последние сигналы</b>',
+        '<pre>Р  Мин  AI   Матч</pre>'
+    ]
     for r in day[-8:][::-1]:
-        icon={'win':'✅','loss':'❌','pending':'⏳'}.get(r.get('result'),'•');lines.append(f"{icon} {r.get('home')} — {r.get('away')} | {r.get('minute')}' {r.get('score_at_signal')} · {r.get('probability')}%")
+        icon={'win':'✅','loss':'❌','pending':'⏳'}.get(r.get('result'),'•')
+        home=str(r.get('home') or '');away=str(r.get('away') or '');name=f'{home} — {away}'
+        if len(name)>29:name=name[:28]+'…'
+        lines.append(f"{icon} <b>{name}</b>\n↳ {r.get('minute')}' · {r.get('score_at_signal')} · AI {r.get('probability')}%")
+    if not day:lines.append('Пока сигналов за сегодня нет.')
     return '\n'.join(lines)
