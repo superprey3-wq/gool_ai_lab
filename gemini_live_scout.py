@@ -7,6 +7,8 @@ import requests
 from live_engine import fetch_stats,parse_stats,fetch_summary,parse_goal_timeline
 import unified_bot
 import ai_signal_journal as journal
+import ai_signal_card
+from telegram_subscribers import get_subscribers
 logger=logging.getLogger("gemini_live_scout")
 MODELS=[x.strip() for x in os.getenv("GEMINI_MODELS","gemini-3.6-flash,gemini-3.5-flash-lite,gemini-3.5-flash").split(",") if x.strip()]
 KEY=os.getenv("GEMINI_API_KEY","").strip()
@@ -37,10 +39,21 @@ def goals(m):
  try:raw=fetch_summary(m.event_id);return parse_goal_timeline(raw) if raw else []
  except:return []
 def payload(m,s):return {"event_id":str(m.event_id),"home":m.home,"away":m.away,"league":getattr(m,"league","") or "турнир не определён","minute":int(m.minute or 0),"score":[int(m.home_score or 0),int(m.away_score or 0)],"xg":pair(s,"xg"),"shots":pair(s,"shots"),"shots_on_target":pair(s,"shots_on_target"),"big_chances":pair(s,"big_chances"),"corners":pair(s,"corners"),"shots_inside_box":pair(s,"shots_inside_box"),"touches_box":pair(s,"touches_box"),"goal_times":goals(m)}
+def _send_photo(card):
+ token=os.getenv("TELEGRAM_BOT_TOKEN","").strip();ok=0
+ for cid in get_subscribers():
+  try:
+   r=requests.post(f"https://api.telegram.org/bot{token}/sendPhoto",data={"chat_id":str(cid)},files={"photo":("gemini_live_scout.png",card,"image/png")},timeout=20)
+   if r.ok:ok+=1
+   else:logger.warning("GEMINI_CARD_SEND_FAILED chat=%s http=%s %s",cid,r.status_code,r.text[:160])
+  except requests.RequestException as e:logger.warning("GEMINI_CARD_SEND_FAILED chat=%s %s",cid,e)
+ return ok>0
 def send(m,v,model):
  prob=int(v.get("goal_probability") or 0);h=int(v.get("horizon_minutes") or 0);league=getattr(m,"league","") or "турнир не определён";now_msk=datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
- text=f"🤖 <b>GEMINI LIVE SCOUT</b>\n🕒 <b>{now_msk} МСК</b>\n\n🏆 <b>{league}</b>\n⚽ <b>{m.home} — {m.away}</b>\n⏱ {m.minute}' | {m.home_score}:{m.away_score}\n\n🔥 <b>ВИЖУ ЕЩЁ ГОЛ</b>\n📊 Оценка AI: <b>{prob}%</b>\n⏳ Горизонт: ~{h} мин\n🧠 Уверенность: {v.get('confidence','')}\n\n💬 {v.get('reason','')}\n⚠️ Риск: {v.get('risk','')}\n\n<i>Независимый анализ сырых LIVE-данных · {model}</i>"
- if not unified_bot.telegram_send(text):return False
+ try:card=ai_signal_card.render(m,v,model,now_msk)
+ except Exception:
+  logger.exception("GEMINI_CARD_RENDER_FAILED %s",getattr(m,"event_id","?"));return False
+ if not _send_photo(card):return False
  journal.add({"event_id":str(m.event_id),"home":m.home,"away":m.away,"league":league,"minute":int(m.minute or 0),"score_at_signal":f"{int(m.home_score or 0)}:{int(m.away_score or 0)}","probability":prob,"horizon":h,"confidence":v.get('confidence',''),"model":model,"reason":v.get('reason',''),"risk":v.get('risk','')});return True
 def scan(live):
  now=time.time();c=[]
