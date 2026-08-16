@@ -1,6 +1,7 @@
 """Independent Gemini LIVE scout: raw Flashscore-derived stats -> Gemini -> Telegram."""
 from __future__ import annotations
 import json,logging,os,time
+from datetime import datetime,timezone,timedelta
 from concurrent.futures import ThreadPoolExecutor,as_completed
 import requests
 from live_engine import fetch_stats,parse_stats,fetch_summary,parse_goal_timeline
@@ -9,6 +10,7 @@ logger=logging.getLogger("gemini_live_scout")
 MODELS=[x.strip() for x in os.getenv("GEMINI_MODELS","gemini-3.6-flash,gemini-3.5-flash-lite,gemini-3.5-flash").split(",") if x.strip()]
 KEY=os.getenv("GEMINI_API_KEY","").strip()
 MINUTE_MIN=int(os.getenv("GEMINI_SCOUT_MINUTE","10"));MINUTE_MAX=int(os.getenv("GEMINI_SCOUT_MAX_MINUTE","88"));ENTER_PROB=int(os.getenv("GEMINI_SCOUT_ENTER_PROB","70"));WORKERS=max(2,int(os.getenv("GEMINI_SCOUT_WORKERS","4")));RECHECK=max(120,int(os.getenv("GEMINI_SCOUT_RECHECK_SECONDS","240")));MAX_AI_PER_CYCLE=max(1,int(os.getenv("GEMINI_SCOUT_MAX_AI_PER_CYCLE","8")))
+MOSCOW_TZ=timezone(timedelta(hours=3))
 _seen={}
 SCHEMA={"type":"OBJECT","properties":{"decision":{"type":"STRING","enum":["ENTER","WATCH","REJECT","NO_DATA"]},"goal_probability":{"type":"INTEGER","minimum":1,"maximum":99},"horizon_minutes":{"type":"INTEGER","minimum":1,"maximum":30},"confidence":{"type":"STRING","enum":["LOW","MEDIUM","HIGH"]},"reason":{"type":"STRING"},"risk":{"type":"STRING"}},"required":["decision","goal_probability","horizon_minutes","confidence","reason","risk"]}
 def pair(s,k):
@@ -17,8 +19,8 @@ def pair(s,k):
 def useful(s):
  return sum(sum(pair(s,k)) for k in ("xg","shots","shots_on_target","big_chances","corners","shots_inside_box","touches_box"))>0
 def prompt(p):
- return """Ты независимый профессиональный футбольный LIVE-аналитик. Твоя специализация — ловить ЕЩЁ ОДИН ГОЛ в текущем матче (рынок тотал больше от текущего счёта). Ты не знаешь решений GOOL, MASTER, MATH или других моделей. Анализируй ТОЛЬКО предоставленные сырые LIVE-данные Flashscore: минуту, счёт, xG, удары, удары в створ, big chances, действия/касания в штрафной, угловые и уже забитые голы. Оцени характер счёта, мотивацию атаковать, темп и оставшееся время. ENTER — только когда сам видишь убедительное основание ждать минимум один следующий гол. WATCH — потенциал есть, но сейчас рано. REJECT — гол недостаточно вероятен. NO_DATA — данных мало. Не выдумывай отсутствующие показатели.
-ВАЖНО: поля reason и risk пиши ТОЛЬКО НА РУССКОМ ЯЗЫКЕ, естественно и кратко. Никогда не используй английские предложения в reason или risk. Названия команд можно оставить как в DATA. reason — 1-2 главных аргумента. risk — один главный риск. goal_probability — честная вероятность хотя бы одного следующего гола до конца матча. horizon_minutes — наиболее вероятный горизонт следующего гола. Верни только JSON по схеме.\nDATA:\n"""+json.dumps(p,ensure_ascii=False)
+ return """Ты независимый профессиональный футбольный LIVE-аналитик. Твоя специализация — ловить ЕЩЁ ОДИН ГОЛ в текущем матче (рынок тотал больше от текущего счёта). Ты не знаешь решений GOOL, MASTER, MATH или других моделей. Анализируй ТОЛЬКО предоставленные сырые LIVE-данные Flashscore: названия команд, турнир/лигу, минуту, счёт, xG, удары, удары в створ, big chances, действия/касания в штрафной, угловые и уже забитые голы. Учитывай контекст турнира только если он явно указан в DATA; ничего не выдумывай. Оцени характер счёта, мотивацию атаковать, темп и оставшееся время. ENTER — только когда сам видишь убедительное основание ждать минимум один следующий гол. WATCH — потенциал есть, но сейчас рано. REJECT — гол недостаточно вероятен. NO_DATA — данных мало. Не выдумывай отсутствующие показатели.
+ВАЖНО: поля reason и risk пиши ТОЛЬКО НА РУССКОМ ЯЗЫКЕ, естественно и кратко. Никогда не используй английские предложения в reason или risk. В reasoning можешь явно ссылаться на команды и турнир из DATA. Названия команд и турнира оставляй как они пришли из Flashscore. reason — 1-2 главных аргумента. risk — один главный риск. goal_probability — честная вероятность хотя бы одного следующего гола до конца матча. horizon_minutes — наиболее вероятный горизонт следующего гола. Верни только JSON по схеме.\nDATA:\n"""+json.dumps(p,ensure_ascii=False)
 def ask(p):
  if not KEY:return None,"missing_api_key",None
  body={"contents":[{"role":"user","parts":[{"text":prompt(p)}]}],"generationConfig":{"maxOutputTokens":300,"response_mime_type":"application/json","response_schema":SCHEMA}}
@@ -40,10 +42,10 @@ def goals(m):
   raw=fetch_summary(m.event_id);return parse_goal_timeline(raw) if raw else []
  except:return []
 def payload(m,s):
- return {"event_id":str(m.event_id),"home":m.home,"away":m.away,"league":getattr(m,"league",""),"minute":int(m.minute or 0),"score":[int(m.home_score or 0),int(m.away_score or 0)],"xg":pair(s,"xg"),"shots":pair(s,"shots"),"shots_on_target":pair(s,"shots_on_target"),"big_chances":pair(s,"big_chances"),"corners":pair(s,"corners"),"shots_inside_box":pair(s,"shots_inside_box"),"touches_box":pair(s,"touches_box"),"goal_times":goals(m)}
+ return {"event_id":str(m.event_id),"home":m.home,"away":m.away,"league":getattr(m,"league","") or "турнир не определён","minute":int(m.minute or 0),"score":[int(m.home_score or 0),int(m.away_score or 0)],"xg":pair(s,"xg"),"shots":pair(s,"shots"),"shots_on_target":pair(s,"shots_on_target"),"big_chances":pair(s,"big_chances"),"corners":pair(s,"corners"),"shots_inside_box":pair(s,"shots_inside_box"),"touches_box":pair(s,"touches_box"),"goal_times":goals(m)}
 def send(m,v,model):
- prob=int(v.get("goal_probability") or 0);h=int(v.get("horizon_minutes") or 0)
- text=f"🤖 <b>GEMINI LIVE SCOUT</b>\n\n⚽ <b>{m.home} — {m.away}</b>\n⏱ {m.minute}' | {m.home_score}:{m.away_score}\n\n🔥 <b>ВИЖУ ЕЩЁ ГОЛ</b>\n📊 Оценка AI: <b>{prob}%</b>\n⏳ Горизонт: ~{h} мин\n🧠 Уверенность: {v.get('confidence','')}\n\n💬 {v.get('reason','')}\n⚠️ Риск: {v.get('risk','')}\n\n<i>Независимый анализ сырых LIVE-данных · {model}</i>"
+ prob=int(v.get("goal_probability") or 0);h=int(v.get("horizon_minutes") or 0);league=getattr(m,"league","") or "турнир не определён";now_msk=datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
+ text=f"🤖 <b>GEMINI LIVE SCOUT</b>\n🕒 <b>{now_msk} МСК</b>\n\n🏆 <b>{league}</b>\n⚽ <b>{m.home} — {m.away}</b>\n⏱ {m.minute}' | {m.home_score}:{m.away_score}\n\n🔥 <b>ВИЖУ ЕЩЁ ГОЛ</b>\n📊 Оценка AI: <b>{prob}%</b>\n⏳ Горизонт: ~{h} мин\n🧠 Уверенность: {v.get('confidence','')}\n\n💬 {v.get('reason','')}\n⚠️ Риск: {v.get('risk','')}\n\n<i>Независимый анализ сырых LIVE-данных · {model}</i>"
  return unified_bot.telegram_send(text)
 def scan(live):
  now=time.time();c=[]
