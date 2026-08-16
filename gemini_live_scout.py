@@ -1,6 +1,6 @@
 """Independent Gemini LIVE scout: raw Flashscore-derived stats -> Gemini -> Telegram."""
 from __future__ import annotations
-import json,logging,os,time
+import asyncio,json,logging,os,time
 from datetime import datetime,timezone,timedelta
 from concurrent.futures import ThreadPoolExecutor,as_completed
 import requests
@@ -12,7 +12,7 @@ from telegram_subscribers import get_subscribers
 logger=logging.getLogger("gemini_live_scout")
 MODELS=[x.strip() for x in os.getenv("GEMINI_MODELS","gemini-3.6-flash,gemini-3.5-flash-lite,gemini-3.5-flash").split(",") if x.strip()]
 KEY=os.getenv("GEMINI_API_KEY","").strip()
-MINUTE_MIN=int(os.getenv("GEMINI_SCOUT_MINUTE","10"));MINUTE_MAX=int(os.getenv("GEMINI_SCOUT_MAX_MINUTE","88"));ENTER_PROB=int(os.getenv("GEMINI_SCOUT_ENTER_PROB","70"));WORKERS=max(2,int(os.getenv("GEMINI_SCOUT_WORKERS","4")));RECHECK=max(120,int(os.getenv("GEMINI_SCOUT_RECHECK_SECONDS","240")));MAX_AI_PER_CYCLE=max(1,int(os.getenv("GEMINI_SCOUT_MAX_AI_PER_CYCLE","8")))
+MINUTE_MIN=int(os.getenv("GEMINI_SCOUT_MINUTE","10"));MINUTE_MAX=int(os.getenv("GEMINI_SCOUT_MAX_MINUTE","88"));ENTER_PROB=int(os.getenv("GEMINI_SCOUT_ENTER_PROB","70"));WORKERS=max(2,int(os.getenv("GEMINI_SCOUT_WORKERS","4")));RECHECK=max(120,int(os.getenv("GEMINI_SCOUT_RECHECK_SECONDS","240")));MAX_AI_PER_CYCLE=max(1,int(os.getenv("GEMINI_SCOUT_MAX_AI_PER_CYCLE","8")));MAX_SIGNAL_DRIFT=max(1,int(os.getenv("GEMINI_SCOUT_MAX_SIGNAL_DRIFT","2")))
 MOSCOW_TZ=timezone(timedelta(hours=3));_seen={}
 SCHEMA={"type":"OBJECT","properties":{"decision":{"type":"STRING","enum":["ENTER","WATCH","REJECT","NO_DATA"]},"goal_probability":{"type":"INTEGER","minimum":1,"maximum":99},"horizon_minutes":{"type":"INTEGER","minimum":1,"maximum":30},"confidence":{"type":"STRING","enum":["LOW","MEDIUM","HIGH"]},"reason":{"type":"STRING"},"risk":{"type":"STRING"}},"required":["decision","goal_probability","horizon_minutes","confidence","reason","risk"]}
 def pair(s,k):
@@ -55,6 +55,31 @@ def send(m,v,model):
   logger.exception("GEMINI_CARD_RENDER_FAILED %s",getattr(m,"event_id","?"));return False
  if not _send_photo(card):return False
  journal.add({"event_id":str(m.event_id),"home":m.home,"away":m.away,"league":league,"minute":int(m.minute or 0),"score_at_signal":f"{int(m.home_score or 0)}:{int(m.away_score or 0)}","probability":prob,"horizon":h,"confidence":v.get('confidence',''),"model":model,"reason":v.get('reason',''),"risk":v.get('risk','')});return True
+def _fresh_match(event_id):
+ try:
+  live=asyncio.run(unified_bot.discover_live_matches())
+  return next((x for x in live if str(getattr(x,'event_id',''))==str(event_id)),None)
+ except Exception as exc:
+  logger.warning("GEMINI_FRESH_RECHECK_FAILED %s: %s",event_id,exc);return None
+def _freshen_before_send(m,v,model):
+ fresh=_fresh_match(m.event_id)
+ if not fresh:
+  logger.warning("GEMINI_STALE_BLOCKED %s reason=not_in_live",m.event_id);return None,None,None
+ old_min=int(getattr(m,'minute',0) or 0);new_min=int(getattr(fresh,'minute',0) or 0);old_score=(int(getattr(m,'home_score',0) or 0),int(getattr(m,'away_score',0) or 0));new_score=(int(getattr(fresh,'home_score',0) or 0),int(getattr(fresh,'away_score',0) or 0))
+ if new_min>MINUTE_MAX:
+  logger.warning("GEMINI_STALE_BLOCKED %s old=%d new=%d reason=too_late",m.event_id,old_min,new_min);return None,None,None
+ drift=max(0,new_min-old_min);changed=drift>MAX_SIGNAL_DRIFT or new_score!=old_score
+ if not changed:return fresh,v,model
+ logger.warning("GEMINI_REANALYZE_FRESH %s old=%d %s new=%d %s",m.event_id,old_min,old_score,new_min,new_score)
+ try:raw=fetch_stats(fresh.event_id);s=parse_stats(raw) if raw else {}
+ except:s={}
+ if not useful(s):return None,None,None
+ nv,e,nmodel=ask(payload(fresh,s))
+ if not nv:
+  logger.warning("GEMINI_FRESH_AI_FAILED %s %s",m.event_id,e);return None,None,None
+ if str(nv.get('decision') or '')!='ENTER' or int(nv.get('goal_probability') or 0)<ENTER_PROB:
+  logger.warning("GEMINI_FRESH_REJECT %s %d' %s %s%%",m.event_id,new_min,nv.get('decision'),nv.get('goal_probability'));return None,None,None
+ return fresh,nv,nmodel
 def scan(live):
  now=time.time();c=[]
  for m in live:
@@ -74,5 +99,7 @@ def scan(live):
   s=stats[str(m.event_id)];p=payload(m,s);v,e,model=ask(p);checked+=1;_seen[str(m.event_id)]=(now,(int(m.home_score or 0),int(m.away_score or 0)))
   if not v:logger.warning("GEMINI_SCOUT_FAILED %s %s",m.event_id,e);continue
   d=str(v.get("decision") or "");prob=int(v.get("goal_probability") or 0);logger.warning("GEMINI_SCOUT %d' %s — %s %d:%d | %s %d%% | model=%s",m.minute,m.home,m.away,m.home_score,m.away_score,d,prob,model)
-  if d=="ENTER" and prob>=ENTER_PROB and send(m,v,model):sent+=1
+  if d=="ENTER" and prob>=ENTER_PROB:
+   fm,fv,fmodel=_freshen_before_send(m,v,model)
+   if fm is not None and send(fm,fv,fmodel):sent+=1
  logger.info("GEMINI_SCOUT_CYCLE live=%d data_candidates=%d ai_checked=%d sent=%d",len(live),len(ready),checked,sent);return sent
