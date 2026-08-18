@@ -2,7 +2,6 @@
 from __future__ import annotations
 from functools import lru_cache
 import os
-from typing import Any
 
 EARLY_MIN_GAMES=int(os.getenv("TENNIS_EARLY_MIN_GAMES","2"))
 EARLY_MAX_GAMES=int(os.getenv("TENNIS_EARLY_MAX_GAMES","5"))
@@ -21,6 +20,7 @@ def _pair(stats,key,default):
 def _pct(v,fallback):
     if v<=0:return fallback
     return max(.25,min(.90,v/100 if v>1 else v))
+
 def stats_quality(stats):
     keys=sorted(k for k in stats if k in USEFUL_STATS);return len(keys),keys
 
@@ -65,21 +65,36 @@ def project_set(g1,g2,h1,h2,next_server=0):
     else:
         p1a,da=solve(1);p1b,db=solve(2);p1=(p1a+p1b)/2;dist={k:(da.get(k,0)+db.get(k,0))/2 for k in set(da)|set(db)}
     return {"p1":p1,"p2":1-p1,"totals":dist}
+
 def over_probability(dist,line):return sum(p for games,p in dist.items() if games>line)
+
+def _best_total(dist):
+    choices=[]
+    for line in TOTAL_LINES:
+        over=over_probability(dist,line);under=1-over
+        if over>=TOTAL_MIN_PROB:choices.append((over-TOTAL_MIN_PROB,over,"OVER",line))
+        if under>=TOTAL_MIN_PROB:choices.append((under-TOTAL_MIN_PROB,under,"UNDER",line))
+    if not choices:return None
+    # Prefer the most decisive projection; for equal confidence prefer the central line.
+    choices.sort(key=lambda x:(x[0],x[1],-abs(x[3]-9.5)),reverse=True)
+    _,prob,pick,line=choices[0]
+    return pick,line,prob
 
 def analyse(match,stats):
     if not EARLY_MIN_GAMES<=match.games_played<=EARLY_MAX_GAMES:return []
     quality,keys=stats_quality(stats)
     if quality<MIN_STATS_KEYS:return []
     is_wta="wta" in (match.tournament or "").lower() or "women" in (match.tournament or "").lower()
-    h1,h2=estimate_holds(stats,is_wta);proj=project_set(match.games1,match.games2,h1,h2,match.server);c=[]
-    for side in (1,2):
-        p=proj[f"p{side}"]
-        if p>=WINNER_MIN_PROB:c.append({"core":"SET_WINNER_CORE","pick":f"P{side}","line":None,"probability":p,"hold1":h1,"hold2":h2,"stats_quality":quality,"stats_keys":keys,"score_strength":p-WINNER_MIN_PROB})
-    totals=[]
-    for line in TOTAL_LINES:
-        p=over_probability(proj["totals"],line)
-        if p>=TOTAL_MIN_PROB:totals.append((line,p))
-    if totals:
-        line,p=max(totals,key=lambda x:x[0]);c.append({"core":"SET_TOTAL_CORE","pick":"OVER","line":line,"probability":p,"hold1":h1,"hold2":h2,"stats_quality":quality,"stats_keys":keys,"score_strength":p-TOTAL_MIN_PROB})
-    c.sort(key=lambda x:(x["score_strength"],x["probability"]),reverse=True);return c[:1]
+    h1,h2=estimate_holds(stats,is_wta);proj=project_set(match.games1,match.games2,h1,h2,match.server);out=[]
+
+    winner_side=1 if proj["p1"]>=proj["p2"] else 2
+    winner_prob=proj[f"p{winner_side}"]
+    out.append({"core":"SET_WINNER_CORE","pick":f"P{winner_side}","line":None,"probability":winner_prob,"entry":winner_prob>=WINNER_MIN_PROB,"hold1":h1,"hold2":h2,"stats_quality":quality,"stats_keys":keys})
+
+    total=_best_total(proj["totals"])
+    if total:
+        pick,line,prob=total
+        out.append({"core":"SET_TOTAL_CORE","pick":pick,"line":line,"probability":prob,"entry":prob>=TOTAL_MIN_PROB,"hold1":h1,"hold2":h2,"stats_quality":quality,"stats_keys":keys})
+
+    # Send a card only when at least one market is strong enough to be an entry.
+    return out if any(x.get("entry") for x in out) else []
